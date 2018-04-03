@@ -1,0 +1,109 @@
+---
+# ./playbook.sh deploy-autoscaling-elb.yml -e project=manhattan -e role=app -e env=production
+#
+# Swap ELBs for the specified auto scaling groups by detaching from one group
+# and reattaching to another. First, the group specified by `new_group` has all
+# its ELBs detached. Then, ELBs attached to the group specified by
+# `current_group` are also attached to the group specified by `new_group`.
+# Once the instances in `new_group` are reporting healthy on the newly attached
+# ELBs, the same ELBs are then detched from `current_group`.
+#
+# The "post-deploy" ELB is then attached to the group specified by
+# `current_group_name`. This is done to enable the `current_group` instances to
+# continue to be accessible in browser, and also to ensure that ELB health
+# checks continue to pass.
+#
+# If there is no live stage group for the environment, then simply transition
+# the pre group to live.
+
+- hosts: localhost
+  connection: local
+
+  pre_tasks:
+
+    - name: Validate arguments
+      assert:
+        that:
+          - env is defined
+          - project is defined
+          - role is defined
+        msg: "Missing required arguments: env and/or project and/or role"
+
+  tasks:
+
+    - name: Identify the pre stage group
+      ec2_asg_facts:
+        tags:
+          env: "{{ env }}"
+          project: "{{ project }}"
+          role: "{{ role }}"
+          stage: pre
+      register: new_group
+      failed_when: new_group.results | length != 1
+      tags: find
+
+    - name: Identify the live stage group
+      ec2_asg_facts:
+        tags:
+          env: "{{ env }}"
+          project: "{{ project }}"
+          role: "{{ role }}"
+          stage: live
+      register: current_group
+      failed_when: current_group.results | length > 1
+      tags: find
+
+    - name: Identify the post stage group
+      ec2_asg_facts:
+        tags:
+          env: "{{ env }}"
+          project: "{{ project }}"
+          role: "{{ role }}"
+          stage: post
+      register: post_group
+      tags: find
+
+
+- hosts: localhost
+  connection: local
+
+  tasks:
+
+    - name: Terminate any existing post stage group
+      ec2_asg:
+        name: "{{ item.auto_scaling_group_name }}"
+        state: absent
+      with_items: "{{ post_group.results }}"
+
+    - name: Transition pre to live when no existing live group
+      ec2_asg_elbs:
+        name: "{{ new_group.results[0].auto_scaling_group_name }}"
+        load_balancers:
+          - "{{ project }}-{{ role }}-live-{{ env }}"
+      when: current_group.results | length == 0
+      tags: cutover
+
+    - name: Perform cutover from pre to live, and live to post
+      ec2_asg_cutover_elb:
+        current_group_name: "{{ current_group.results[0].auto_scaling_group_name }}"
+        new_group_name: "{{ new_group.results[0].auto_scaling_group_name }}"
+        wait_timeout: 600
+      register: cutover
+      when: current_group.results | length == 1
+      tags: cutover
+
+    - name: Tag the now live stage group
+      ec2_asg:
+        name: "{{ new_group.results[0].auto_scaling_group_name }}"
+        health_check_type: "{{ new_group.results[0].health_check_type }}" # required to prevent resetting to the default
+        tags: "{{ new_group.results[0].tags | format_asg_tags | symmetric_difference(new_group.results[0].tags | format_asg_tags | selectattr('stage', 'defined') | list) | union([{'stage': 'live', 'propagate_at_launch': False}]) }}"
+
+    - name: Tag the now post stage group
+      ec2_asg:
+        name: "{{ current_group.results[0].auto_scaling_group_name }}"
+        health_check_type: "{{ current_group.results[0].health_check_type }}" # required to prevent resetting to the default
+        tags: "{{ current_group.results[0].tags | format_asg_tags | symmetric_difference(current_group.results[0].tags | format_asg_tags | selectattr('stage', 'defined') | list) | union([{'stage': 'post', 'propagate_at_launch': False}]) }}"
+      when: cutover | changed
+
+
+# vim: set ft=ansible ts=2 sts=2 sw=2 expandtab:
