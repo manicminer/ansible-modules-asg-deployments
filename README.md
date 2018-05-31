@@ -2,7 +2,7 @@
 
 This is a set of modules to orchestrate blue-green style deployments with AWS Auto Scaling Groups and Application Load Balancers / Elastic Load Balancers.
 
-There are different modules for ALB ane ELB, depending on which resource is used in your environment.
+There are different modules for ALB and Classic ELB, depending on which resource is used in your environment.
 
 Compatible with Ansible 2.3+
 
